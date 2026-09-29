@@ -1,0 +1,4 @@
+local.env
+build/
+__pycache__/
+/icon.png
