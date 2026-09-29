@@ -92,7 +92,7 @@ C.CONFIG.write_text(json.dumps(cfg, indent=2))
 PYEOF
 fi
 
-# ---- launchd: recorder at login, classifier daily, watchers weekly/monthly ----
+# ---- launchd: recorder at login, live summary every 15 min, classifier daily, watchers weekly/monthly ----
 PATHS="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 agent() {  # label, schedule-dict (empty = run at login and keep alive), program args...
   local label="$1" when="$2"; shift 2
@@ -103,7 +103,10 @@ agent() {  # label, schedule-dict (empty = run at login and keep alive), program
     echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
     echo "<plist version=\"1.0\"><dict><key>Label</key><string>$label</string>"
     echo "<key>ProgramArguments</key><array>$args</array>"
-    if [ -z "$when" ]; then
+    if [ "${when#INTERVAL:}" != "$when" ]; then
+      echo "<key>StartInterval</key><integer>${when#INTERVAL:}</integer><key>RunAtLoad</key><true/>"
+      echo "<key>StandardOutPath</key><string>$DATA/logs/${label##*.}.log</string><key>StandardErrorPath</key><string>$DATA/logs/${label##*.}.log</string>"
+    elif [ -z "$when" ]; then
       echo "<key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ProcessType</key><string>Interactive</string>"
     else
       echo "<key>StartCalendarInterval</key><dict>$when</dict>"
@@ -116,6 +119,7 @@ agent() {  # label, schedule-dict (empty = run at login and keep alive), program
 }
 agent "$BUNDLE_ID"         ""  "$APP/Contents/MacOS/WorkTape"
 agent "$BUNDLE_ID.daily"   "<key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer>" "$PY" "$DATA/bin/classify.py" --catch-up
+agent "$BUNDLE_ID.live"    "INTERVAL:900" "$PY" "$DATA/bin/classify.py" --live
 agent "$BUNDLE_ID.weekly"  "<key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer>" "$PY" "$DATA/bin/watcher.py" weekly
 agent "$BUNDLE_ID.monthly" "<key>Day</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer>" "$PY" "$DATA/bin/watcher.py" monthly
 

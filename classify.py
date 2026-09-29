@@ -730,10 +730,62 @@ def write_index():
         for p in sorted((REPORTS / kind).glob("*.html"), reverse=True)[:6]:
             links.append(f'<a href="{kind}/{p.name}">{kind.title()} review {p.stem}</a>')
     reviews = f"<p>{' · '.join(links)}</p>" if links else ""
+    lv = DATA / "live.json"
+    if lv.exists():
+        L = json.loads(lv.read_text())
+        if L["day"] == dt.date.today().isoformat():
+            fm = lambda m: f"{int(m // 60)}h {int(m % 60):02d}m" if m >= 60 else f"{m:.0f}m"
+            apps = " · ".join(f"{html.escape(k)} {fm(v)}" for k, v in L["by_app"].items())
+            sites = " · ".join(f"{html.escape(k)} {fm(v)}" for k, v in L["tax_sites"].items())
+            reviews = f"""<div class="tax"><div class="taxhead"><b>Today so far: {fm(L['minutes'])} recorded</b>
+<span class="muted">updated {L['updated']} · the full workflow report arrives at 07:00 tomorrow</span></div>
+<p>Stupidity tax: <b>{fm(L['tax_minutes'])}</b>{(' <span class=muted>(' + sites + ')</span>') if sites else ''}
+{f" · hands-on {fm(L['hands_on_minutes'])}" if L['hands_on_minutes'] else ''}</p>
+<p class="muted">{apps}</p></div>""" + reviews
     (REPORTS / "index.html").write_text(f"""<!doctype html><html><head><meta charset="utf-8"><title>WorkTape days</title>
 <style>{CSS} table{{border-collapse:collapse;width:100%}}td,th{{text-align:left;padding:8px;border-bottom:1px solid var(--line)}}a{{color:var(--accent)}}</style>
 </head><body><main><h1>WorkTape</h1><p class="muted">One report per day. Raw data: ~/WorkTape/data/segments.csv</p>
 {reviews}<table><tr><th>Day</th><th>Recorded</th><th>Stupidity tax</th><th>Top workflows</th></tr>{''.join(rows)}</table></main></body></html>""")
+
+
+# ---------- live "today so far" (local, no tokens) ----------
+
+def load_today(day):
+    """Every frame recorded today: finished hours (videos/*.tsv) plus the hour in progress (frames/*/log.tsv)."""
+    by_time = {}
+    logs = sorted((VIDEOS / day).glob("*.tsv")) + sorted((ROOT / "frames" / day).glob("*/log.tsv"))
+    for tsv in logs:
+        for line in tsv.read_text(errors="ignore").splitlines():
+            p = line.split("\t")
+            if len(p) >= 2:
+                num = lambda k: float(p[k]) if len(p) > k and p[k].strip() else None
+                by_time[p[0]] = {"time": p[0], "hour": p[0][11:13], "n": 0, "app": p[1],
+                                 "title": p[2] if len(p) > 2 else "", "input": num(3), "keys": num(4)}
+    return [by_time[t] for t in sorted(by_time)]
+
+
+APP_NAMES = {"com.anthropic.claudefordesktop": "Claude", "com.brave.Browser": "Brave", "com.google.Chrome": "Chrome",
+             "company.thebrowser.Browser": "Arc", "com.apple.Safari": "Safari", "com.microsoft.edgemac": "Edge",
+             "com.apple.Terminal": "Terminal", "com.googlecode.iterm2": "iTerm", "com.mitchellh.ghostty": "Ghostty"}
+
+
+def live(cfg):
+    day = dt.date.today().isoformat()
+    frames = load_today(day)
+    fs = cfg["frameSeconds"]
+    waste = compute_waste(frames, cfg)
+    per = {}
+    for f in frames:
+        name = site_of(f["title"], cfg) or APP_NAMES.get(f["app"], f["app"].split(".")[-1])
+        per[name] = per.get(name, 0) + fs / 60
+    hands = [f for f in frames if f["input"] is not None]
+    on = sum(1 for f in hands if f["input"] <= cfg["handsOnSeconds"]) * fs / 60
+    (DATA / "live.json").write_text(json.dumps({
+        "day": day, "updated": dt.datetime.now().strftime("%H:%M"), "minutes": round(len(frames) * fs / 60, 1),
+        "hands_on_minutes": round(on, 1), "tax_minutes": waste["passive_minutes"],
+        "tax_sites": {k: v["passive"] for k, v in waste["per_site"].items() if v["passive"]},
+        "by_app": dict(sorted(((k, round(v, 1)) for k, v in per.items()), key=lambda kv: -kv[1])[:6])}))
+    write_index()
 
 
 # ---------- main ----------
@@ -799,6 +851,9 @@ def main():
     cfg = load_config()
     args = sys.argv[1:]
     today = dt.date.today()
+    if args and args[0] == "--live":
+        live(cfg)
+        return
     if args and args[0] == "--catch-up":
         days = [(today - dt.timedelta(days=k)).isoformat() for k in range(7, 0, -1)]
         days = [d for d in days if (VIDEOS / d).exists() and stale(d)]

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 [ -f local.env ] && source local.env
 BUNDLE_ID="${BUNDLE_ID:-com.worktape.app}"
 
-for label in "$BUNDLE_ID" "$BUNDLE_ID.daily" "$BUNDLE_ID.weekly" "$BUNDLE_ID.monthly"; do
+for label in "$BUNDLE_ID" "$BUNDLE_ID.daily" "$BUNDLE_ID.live" "$BUNDLE_ID.weekly" "$BUNDLE_ID.monthly"; do
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null
   rm -f "$HOME/Library/LaunchAgents/$label.plist"
 done
