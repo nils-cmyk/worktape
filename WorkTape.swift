@@ -88,7 +88,11 @@ func fmt(_ pattern: String) -> DateFormatter {
 }
 let dayF = fmt("yyyy-MM-dd"), hourF = fmt("HH"), timeF = fmt("HHmmss"), isoF = fmt("yyyy-MM-dd HH:mm:ss")
 
-final class WorkTape: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class WorkTape: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler {
+    var classifier: Process?
+    var classifierStatus = ""
+    var classifierDidWork = false
+    var classifierManual = false
     var dashboard: NSWindow?
     var web: WKWebView?
     var config = loadConfig()
@@ -152,6 +156,7 @@ final class WorkTape: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if dashboard == nil {
             let cfg = WKWebViewConfiguration()
             cfg.mediaTypesRequiringUserActionForPlayback = []
+            cfg.userContentController.add(self, name: "worktape")   // the page's "Classify now" button
             let view = WKWebView(frame: .zero, configuration: cfg)
             let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 880),
                                styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -165,6 +170,8 @@ final class WorkTape: NSObject, NSApplicationDelegate, NSWindowDelegate {
             web = view
         }
         goHome()
+        // Past 07:00 and something wasn't classified (laptop was off at 7)? Catch up quietly in the background.
+        if Calendar.current.component(.hour, from: Date()) >= 7 { runClassifier(["--catch-up"], label: nil) }
         NSApp.setActivationPolicy(.regular)   // Dock icon + menu bar while the window is open
         dashboard?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -178,6 +185,78 @@ final class WorkTape: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 .write(to: index, atomically: true, encoding: .utf8)
         }
         web?.loadFileURL(index, allowingReadAccessTo: root)
+    }
+
+    // MARK: classifier on demand
+
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        switch message.body as? String {
+        case "classify": runClassifier(["--now"], label: "Starting…")
+        case "hello": pushStatus()   // a page (re)loaded while a run is going
+        default: break
+        }
+    }
+
+    func runClassifier(_ args: [String], label: String?) {
+        guard classifier == nil else { pushStatus(); return }
+        let script = root.appendingPathComponent("bin/classify.py").path
+        guard FileManager.default.fileExists(atPath: script) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")
+                              ? "/usr/bin/python3" : "/opt/homebrew/bin/python3")
+        p.arguments = [script] + args
+        var env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        let logURL = root.appendingPathComponent("logs/manual.log")
+        try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
+        let logHandle = try? FileHandle(forWritingTo: logURL)
+        logHandle?.seekToEndOfFile()
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            guard !d.isEmpty else { return }
+            logHandle?.write(d)
+            let text = String(decoding: d, as: UTF8.self)
+            if text.contains(": done,") { DispatchQueue.main.async { self?.classifierDidWork = true } }
+            // show the latest progress line, without the "[HH:MM:SS]" prefix
+            if let last = text.split(separator: "\n").last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                let line = last.replacingOccurrences(of: #"^\[\d\d:\d\d:\d\d\] "#, with: "", options: .regularExpression)
+                DispatchQueue.main.async { self?.classifierStatus = line; self?.pushStatus() }
+            }
+        }
+        p.terminationHandler = { [weak self] _ in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            try? logHandle?.close()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.classifier = nil
+                self.classifierStatus = ""
+                if self.classifierDidWork || self.classifierManual { self.web?.reload() } else { self.pushStatus() }
+            }
+        }
+        do {
+            try p.run()
+            classifier = p
+            classifierDidWork = false
+            classifierManual = label != nil
+            classifierStatus = label ?? ""
+            pushStatus()
+        } catch {
+            classifierStatus = "Could not start the classifier: \(error.localizedDescription)"
+            pushStatus()
+        }
+    }
+
+    func pushStatus() {
+        let busy = classifier != nil
+        let data = try? JSONSerialization.data(withJSONObject: [classifierStatus])
+        let arg = data.flatMap { String(data: $0, encoding: .utf8) }.map { String($0.dropFirst().dropLast()) } ?? "\"\""
+        web?.evaluateJavaScript("window.worktapeStatus && window.worktapeStatus(\(arg), \(busy))")
     }
 
     @objc func goBack() { web?.goBack() }

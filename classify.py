@@ -16,6 +16,7 @@ Usage:
 
 import csv
 import datetime as dt
+import fcntl
 import html
 import json
 import os
@@ -743,9 +744,20 @@ def write_index():
 {f" · hands-on {fm(L['hands_on_minutes'])}" if L['hands_on_minutes'] else ''}</p>
 <p class="muted">{apps}</p></div>""" + reviews
     (REPORTS / "index.html").write_text(f"""<!doctype html><html><head><meta charset="utf-8"><title>WorkTape days</title>
-<style>{CSS} table{{border-collapse:collapse;width:100%}}td,th{{text-align:left;padding:8px;border-bottom:1px solid var(--line)}}a{{color:var(--accent)}}</style>
+<style>{CSS} #bar{{display:none;align-items:center;gap:12px;margin:0 0 16px}}#bar button{{font-size:14px;padding:6px 14px}}
+table{{border-collapse:collapse;width:100%}}td,th{{text-align:left;padding:8px;border-bottom:1px solid var(--line)}}a{{color:var(--accent)}}</style>
 </head><body><main><h1>WorkTape</h1><p class="muted">One report per day. Raw data: ~/WorkTape/data/segments.csv</p>
-{reviews}<table><tr><th>Day</th><th>Recorded</th><th>Stupidity tax</th><th>Top workflows</th></tr>{''.join(rows)}</table></main></body></html>""")
+<div id="bar"><button id="run" onclick="classifyNow()">Classify now</button><span id="st" class="muted">Classifies every day not yet done, plus today so far.</span></div>
+{reviews}<table><tr><th>Day</th><th>Recorded</th><th>Stupidity tax</th><th>Top workflows</th></tr>{''.join(rows)}</table></main>
+<script>
+const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.worktape;
+if (h) {{ document.getElementById('bar').style.display = 'flex'; h.postMessage('hello'); }}
+function classifyNow() {{ h.postMessage('classify'); }}
+window.worktapeStatus = (t, busy) => {{
+  document.getElementById('run').disabled = !!busy;
+  document.getElementById('st').textContent = t || 'Classifies every day not yet done, plus today so far.';
+}};
+</script></body></html>""")
 
 
 # ---------- live "today so far" (local, no tokens) ----------
@@ -786,6 +798,50 @@ def live(cfg):
         "tax_sites": {k: v["passive"] for k, v in waste["per_site"].items() if v["passive"]},
         "by_app": dict(sorted(((k, round(v, 1)) for k, v in per.items()), key=lambda kv: -kv[1])[:6])}))
     write_index()
+
+
+# ---------- classify on demand ----------
+
+def stitch_partial(day, cfg):
+    """Turn the hour in progress into a video so it can be classified now. The recorder rewrites this file with
+    the full hour when the hour ends, keeping the same frame order, so cached descriptions still match."""
+    hour = dt.datetime.now().strftime("%H")
+    hour_dir = ROOT / "frames" / day / hour
+    jpgs = sorted(hour_dir.glob("*.jpg"))[:-1]    # skip the newest frame: it may still be being written
+    if not jpgs:
+        return
+    have = {p.stem for p in jpgs}
+    log_path = hour_dir / "log.tsv"
+    lines = [l for l in log_path.read_text(errors="ignore").splitlines()
+             if l and l.split("\t")[0][11:].replace(":", "") in have] if log_path.exists() else []
+    snap = ROOT / "frames" / f".snapshot-{day}-{hour}"
+    shutil.rmtree(snap, ignore_errors=True)
+    snap.mkdir(parents=True)
+    for p in jpgs:
+        os.symlink(p, snap / p.name)
+    out = VIDEOS / day
+    out.mkdir(parents=True, exist_ok=True)
+    w, h = 1920, 1200
+    r = subprocess.run([cfg["ffmpeg"], "-y", "-loglevel", "error", "-framerate", str(1 / cfg["frameSeconds"]),
+                        "-pattern_type", "glob", "-i", str(snap / "*.jpg"),
+                        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+                        "-c:v", "hevc_videotoolbox", "-q:v", "50", "-tag:v", "hvc1", str(out / f"{hour}.mp4")])
+    shutil.rmtree(snap, ignore_errors=True)
+    if r.returncode == 0:
+        (out / f"{hour}.tsv").write_text("\n".join(lines) + "\n")
+        log(f"{day}: added the hour in progress ({len(jpgs)} frames)")
+
+
+def lock_or_exit():
+    """One classifier at a time: the 07:00 job, the catch-up on opening the app, and the button share this lock."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    fh = open(ROOT / ".classify.lock", "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("Already classifying; this run will skip.")
+        sys.exit(0)
+    return fh
 
 
 # ---------- main ----------
@@ -854,9 +910,17 @@ def main():
     if args and args[0] == "--live":
         live(cfg)
         return
-    if args and args[0] == "--catch-up":
-        days = [(today - dt.timedelta(days=k)).isoformat() for k in range(7, 0, -1)]
+    _lock = lock_or_exit()  # noqa: F841 (held until exit)
+    if args and args[0] in ("--catch-up", "--now"):
+        # every unclassified or updated day still on disk; --now also does today so far
+        days = [(today - dt.timedelta(days=k)).isoformat() for k in range(31, 0, -1)]
         days = [d for d in days if (VIDEOS / d).exists() and stale(d)]
+        if args[0] == "--now":
+            stitch_partial(today.isoformat(), cfg)
+            if (VIDEOS / today.isoformat()).exists():
+                days.append(today.isoformat())
+        if not days:
+            log("Everything is already classified.")
     else:
         days = [args[0] if args else (today - dt.timedelta(days=1)).isoformat()]
     done = []
