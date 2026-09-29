@@ -72,3 +72,7 @@ bash uninstall.sh --delete-recordings  # also moves ~/WorkTape to the Trash
 - Keystrokes and clicks are counted, never logged: the app reads the counters macOS already keeps, not the keys themselves.
 - If you have an Apple Development certificate, the installer signs the app with it, so macOS permissions survive reinstalls. Without one, macOS may ask for Screen Recording again after each reinstall.
 - The reports use your Claude plan: about one Claude call per 15 minutes of recorded time on a busy day (so around 30 for 8 hours), fewer when the screen is mostly still. A weekly or monthly review is one more call.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
